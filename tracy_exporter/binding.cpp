@@ -1,4 +1,3 @@
-#define PY_SSIZE_T_CLEAN // for parsing "s#"
 #include <Python.h>
 #include <iostream>
 #include <sstream>
@@ -16,7 +15,7 @@ public:
 		m_src = new char[FileBufSize];
 		m_dst = new char[FileBoundSize];
 		if (input_file && std::strlen(input_file)) {
-			auto mode = std::fstream::out;
+			auto mode = std::fstream::out | std::fstream::binary;
 			if (append)
 				mode |= std::fstream::app;
 			m_fs.open(input_file, mode);
@@ -129,11 +128,11 @@ static void Lz4Writer_dealloc(Py_Lz4Writer *self)
 }
 
 static PyObject *Lz4Writer_write(Py_Lz4Writer *self, PyObject *args) {
-	const char *src;
-	Py_ssize_t src_len;
-	if (!PyArg_ParseTuple(args, "s#", &src, &src_len))
+	Py_buffer view;
+	bool flush = false;
+	if (!PyArg_ParseTuple(args, "y*|b", &view, &flush))
 		return NULL;
-	self->stream->write(src, src_len);
+	self->stream->write((const char*)view.buf, view.len, flush);
 	Py_RETURN_NONE;
 }
 
@@ -206,14 +205,13 @@ int Lz4Writer_Init(PyObject *module)
 
 static PyObject* lz4_compress(PyObject *self, PyObject *args)
 {
-	const char *src;
-	Py_ssize_t src_len;
-	if (!PyArg_ParseTuple(args, "s#", &src, &src_len))
+	Py_buffer view;
+	if (!PyArg_ParseTuple(args, "y*", &view))
 		return NULL;
 
 	char dst[1000];
 
-	int dst_len = tracy::LZ4_compress_default(src, dst, src_len, 1000);
+	int dst_len = tracy::LZ4_compress_default((const char*)view.buf, dst, view.len, 1000);
 
 	return PyBytes_FromStringAndSize(dst, dst_len);
 }
