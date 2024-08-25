@@ -127,6 +127,6 @@ PYBIND11_MODULE(tracy_lz4, m) {
 	m.def("compress", &lz4_compress, "compress a short string, just for testing");
 	py::class_<Lz4Writer>(m, "Writer")
         .def(py::init<const char*, bool>(), py::arg("filename")=nullptr, py::arg("append")=true)
-        .def("write", &Lz4Writer::write)
+        .def("write", &Lz4Writer::write, py::arg("input"), py::arg("flush")=false)
         .def("dump", &Lz4Writer::dump);
 }
