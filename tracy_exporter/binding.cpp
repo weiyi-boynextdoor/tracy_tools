@@ -1,9 +1,13 @@
 #include <Python.h>
+#include <pybind11/pybind11.h>
 #include <iostream>
 #include <sstream>
 #include <fstream>
 #include <string>
+#include <string_view>
 #include "tracy_lz4.hpp"
+
+namespace py = pybind11;
 
 // 见TracyFileMeta.hpp
 constexpr size_t FileBufSize = 64 * 1024; // 输入块大小
@@ -11,7 +15,7 @@ constexpr size_t FileBoundSize = LZ4_COMPRESSBOUND(FileBufSize); // 压缩后输
 
 class Lz4Writer {
 public:
-	Lz4Writer(const char* input_file, bool append=true) {
+	Lz4Writer(const char* input_file=nullptr, bool append=true) {
 		m_src = new char[FileBufSize];
 		m_dst = new char[FileBoundSize];
 		if (input_file && std::strlen(input_file)) {
@@ -35,7 +39,10 @@ public:
 	// 一般缓冲区满了再压缩输出
 	// flush为true时就算缓存区不满也强制压缩
 	// tracy里是多线程压缩，我们就不管了吧
-	void write(const char* src, size_t size, bool flush=false) {
+	void write(const pybind11::bytes& input, bool flush=false) {
+		std::string_view view(input);
+		auto src = view.data();
+		auto size = view.size();
 		if (m_offset + size < FileBufSize) {
 			if (flush) {
 				memcpy(m_src, src, size);
@@ -71,10 +78,10 @@ public:
 	}
 
 	// 调试用，看最近一个block压缩结果
-	std::string_view dump() {
+	pybind11::bytes dump() {
 		if (m_dstlen <= 0 || m_dstlen > FileBoundSize)
 			return {};
-		return std::string_view(m_dst, m_dstlen);
+		return pybind11::bytes(m_dst, m_dstlen);
 	}
 
 private:
@@ -104,142 +111,22 @@ private:
 	size_t m_dstlen{};
 };
 
-struct Py_Lz4Writer {
-	PyObject_HEAD
-	Lz4Writer* stream{};
-};
-
-static PyObject* Lz4Writer_init(PyTypeObject* cls, PyObject* args, PyObject* kwds) {
-	static const char *kwlist[] = {"filename", "append", nullptr};
-	const char* filename = nullptr;
-	bool append = false;
-	if (!PyArg_ParseTupleAndKeywords(args, kwds, "|sb", (char**)kwlist, &filename, &append)) {
-		return nullptr;
-	}
-	auto self = (Py_Lz4Writer*)cls->tp_alloc(cls, 0);
-	self->stream = new Lz4Writer(filename, append);
-	return (PyObject*)self;
-}
-
-static void Lz4Writer_dealloc(Py_Lz4Writer *self)
+pybind11::bytes lz4_compress(const pybind11::bytes& input)
 {
-  delete self->stream;
-  Py_TYPE(self)->tp_free((PyObject *)self);
-}
-
-static PyObject *Lz4Writer_write(Py_Lz4Writer *self, PyObject *args) {
-	Py_buffer view;
-	bool flush = false;
-	if (!PyArg_ParseTuple(args, "y*|b", &view, &flush))
-		return NULL;
-	self->stream->write((const char*)view.buf, view.len, flush);
-	Py_RETURN_NONE;
-}
-
-static PyObject *Lz4Writer_dump(Py_Lz4Writer *self) {
-	std::string str(self->stream->dump());
-	return PyBytes_FromStringAndSize(str.c_str(), str.size());
-}
-
-static PyMethodDef Lz4Writer_methods[] = {
-	{"write", (PyCFunction)Lz4Writer_write, METH_VARARGS, nullptr},
-	{"dump", (PyCFunction)Lz4Writer_dump, METH_NOARGS, nullptr},
-    {nullptr, nullptr, 0, nullptr},
-};
-
-PyTypeObject Lz4Writer_Type = {
-    /*ob_base*/ PyVarObject_HEAD_INIT(nullptr, 0)
-    /*tp_name*/ "Stream",
-    /*tp_basicsize*/ sizeof(Py_Lz4Writer),
-    /*tp_itemsize*/ 0,
-    /*tp_dealloc*/ (destructor)Lz4Writer_dealloc,
-    /*tp_vectorcall_offset*/ 0,
-    /*tp_getattr*/ nullptr,
-    /*tp_setattr*/ nullptr,
-    /*tp_as_async*/ nullptr,
-    /*tp_repr*/ nullptr,
-    /*tp_as_number*/ nullptr,
-    /*tp_as_sequence*/ nullptr,
-    /*tp_as_mapping*/ nullptr,
-    /*tp_hash*/ nullptr,
-    /*tp_call*/ nullptr,
-    /*tp_str*/ nullptr,
-    /*tp_getattro*/ nullptr,
-    /*tp_setattro*/ nullptr,
-    /*tp_as_buffer*/ nullptr,
-    /*tp_flags*/ Py_TPFLAGS_DEFAULT,
-    /*tp_doc*/ nullptr,
-    /*tp_traverse*/ nullptr,
-    /*tp_clear*/ nullptr,
-    /*tp_richcompare*/ nullptr,
-    /*tp_weaklistoffset*/ 0,
-    /*tp_iter*/ nullptr,
-    /*tp_iternext*/ nullptr,
-    /*tp_methods*/ Lz4Writer_methods,
-    /*tp_members*/ nullptr,
-    /*tp_getset*/ nullptr,
-    /*tp_base*/ nullptr,
-    /*tp_dict*/ nullptr,
-    /*tp_descr_get*/ nullptr,
-    /*tp_descr_set*/ nullptr,
-    /*tp_dictoffset*/ 0,
-    /*tp_init*/ 0,
-    /*tp_alloc*/ nullptr,
-    /*tp_new*/ Lz4Writer_init,
-};
-
-int Lz4Writer_Init(PyObject *module)
-{
-  if (module == nullptr) {
-    return -1;
-  }
-
-  if (PyType_Ready(&Lz4Writer_Type) < 0) {
-    return -1;
-  }
-
-  Py_INCREF(&Lz4Writer_Type);
-  PyModule_AddObject(module, "Writer", (PyObject *)&Lz4Writer_Type);
-  return 0;
-}
-
-static PyObject* lz4_compress(PyObject *self, PyObject *args)
-{
-	Py_buffer view;
-	if (!PyArg_ParseTuple(args, "y*", &view))
-		return NULL;
+	std::string_view src(input);
 
 	char dst[1000];
 
-	int dst_len = tracy::LZ4_compress_default((const char*)view.buf, dst, view.len, 1000);
+	int dst_len = tracy::LZ4_compress_default(src.data(), dst, src.size(), 1000);
 
-	return PyBytes_FromStringAndSize(dst, dst_len);
+	return pybind11::bytes(dst, dst_len);
 }
 
-static PyMethodDef LZ4_Methods[] = {
-	{"compress", lz4_compress, METH_VARARGS, "compress a string"},
-	{NULL, NULL, 0, NULL}        /* Sentinel */
-};
-
-PyDoc_STRVAR(
-	TRACY_LZ4_doc,
-	"This module provides access to blenders bmesh data structures.\n");
-
-static struct PyModuleDef LZ4_MODULE = {
-	/*m_base*/ PyModuleDef_HEAD_INIT,
-	/*m_name*/ "tracy_lz4",
-	/*m_doc*/ TRACY_LZ4_doc,
-	/*m_size*/ -1,
-	/*m_methods*/ LZ4_Methods,
-	/*m_slots*/ nullptr,
-	/*m_traverse*/ nullptr,
-	/*m_clear*/ nullptr,
-	/*m_free*/ nullptr,
-};
-
-PyObject* PyInit_tracy_lz4(void)
-{
-	PyObject *mod = PyModule_Create(&LZ4_MODULE);
-	Lz4Writer_Init(mod);
-	return mod;
+PYBIND11_MODULE(tracy_lz4, m) {
+	m.doc() = "Tracy LZ4 compress";
+	m.def("compress", &lz4_compress, "compress a short string, just for testing");
+	py::class_<Lz4Writer>(m, "Writer")
+        .def(py::init<const char*, bool>(), py::arg("filename")=nullptr, py::arg("append")=true)
+        .def("write", &Lz4Writer::write)
+        .def("dump", &Lz4Writer::dump);
 }
